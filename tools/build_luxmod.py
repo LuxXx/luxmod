@@ -59,6 +59,11 @@ HOST_FUNCS.update({
     "UT_FireSmoke": 287330,
     "UT_FireWeapon": 289235,
     "UT_ClientSpawn": 175123,
+    "UT_BulletHit": 292545,
+    "UT_GiveGear": 169705,
+    "G_TempEntity": 277695,
+    "DirToByte": 60317,
+    "G_RadiusDamage": 214860,
 })
 # every "CONST func; CALL" in the stock code is redirected to the hook
 REDIRECTS = {
@@ -67,6 +72,8 @@ REDIRECTS = {
     286473: "hook_fire_grenade",
     287330: "hook_fire_smoke",
     175123: "hook_spawn",
+    292545: "hook_bullet_hit",
+    169705: "hook_gear",
 }
 # Stock functions copied into the graft with hard-coded constants replaced by
 # reads of luxmod globals (CONST v -> CONST &global; LOAD4), so lux_reload can

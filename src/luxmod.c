@@ -12,6 +12,7 @@
  *   lux_dump <weapon>   print the current values of a weapon
  *   lux_diff            list every table field that differs from stock
  *   lux_throw <player> <he|smoke|hk69>  make a player fire a projectile
+ *   lux_inv <player>    list a player's weapons and items
  *   gh <player|all> <hp>       set health (+N / -N adds)
  *   gw <player|all> <weapons>  give or refill weapons: name ("lr300") or letters
  *   gi <player|all> <items>    give items: name ("medkit") or letters a-g
@@ -43,6 +44,11 @@ void	UT_FireHK69( int ent );
 void	UT_FireGrenade( int ent );	/* HE */
 void	UT_FireWeapon( int ent );	/* sets up aim vectors, dispatches on s.weapon */
 void	UT_ClientSpawn( int ent );
+void	UT_GiveGear( int client );	/* clears inventory, gives knife + userinfo gear */
+int	UT_BulletHit( int shooter, int trace, int weapon, int a3, int apply, int a5 );
+int	G_TempEntity( float *origin, int event );
+int	DirToByte( float *dir );
+int	G_RadiusDamage( float *origin, int attacker, float damage, float radius, int ignore, int mod );
 void	UT_FireSmoke( int ent );
 float	sqrt( float x );
 void	lux_blob_init( void );	/* generated: writes our DATA/LIT into memory */
@@ -92,6 +98,10 @@ void	lux_blob_init( void );	/* generated: writes our DATA/LIT into memory */
 #define ENT_SPLASHDMG	696
 #define ENT_SPLASHRAD	700
 #define DAMAGE_NO_KNOCKBACK 4
+#define ENT_EVENTPARM	184
+#define EV_EXPLOSION	55	/* what exploding grenades send */
+#define CL_ITEMS	376	/* 16 x { u8 item, ... } */
+#define CL_WEAPONSLOT	144	/* selected inventory slot */
 #define FIRST_ITEM	17	/* bg_itemlist: Vest, NVG, Medkit, Silencer, Laser, Helmet, Extra Ammo */
 #define NUM_ITEMS	7
 
@@ -140,6 +150,30 @@ float	lux_fall_injury_medium = 0.3f;
 static const int bleedStock[NUM_BLEED] = { 9, 4, 3, 2, 1 };
 static int	startHealth;
 static int	luxReady;	/* hooks pass through until the first Lux_Load */
+
+/* vampire: Player { Vampire, Kill Heal, Vampire Max Health } */
+static int	vampPct, killHeal, vampMax;
+
+/* explosive bullets per weapon: splash damage (0 = off) and radius */
+static int	explDamage[WT_COUNT], explRadius[WT_COUNT];
+
+/* Loadout { } - index 0 everyone, 1 red, 2 blue */
+#define LO_MAX		16
+typedef struct {
+	int	set, replace;
+	int	weapons[LO_MAX], numWeapons;
+	int	items[LO_MAX], numItems;
+} luxLoadout_t;
+static luxLoadout_t	loadouts[3];
+
+static int Lux_ParseSpec( const char *spec, int items, int *out, int max );
+static int Lux_FindWeaponLoose( const char *query );
+static const char *itemNames[NUM_ITEMS] = {
+	"Kevlar Vest", "TacGoggles", "Medkit", "Silencer", "Laser Sight", "Helmet", "Extra Ammo"
+};
+
+static int Lux_GiveWeapon( unsigned char *cl, int w );
+static void Lux_ApplyLoadout( unsigned char *cl );
 static int	causeScale[64];	/* Damage { } percent by means of death */
 
 typedef struct {
@@ -418,6 +452,22 @@ static void Lux_SetWeaponKey( int w, int mode, const char *key, const char *val 
 		return;
 	}
 
+	if ( mode < 0 && Lux_NameEq( key, "Explosive Bullets" ) ) {
+		if ( Lux_IsHitscan( w, WT_MODES ) ) {
+			explDamage[w] = (int)f;
+			numApplied++;
+		} else {
+			Lux_Warn( "only for bullet weapons, ignored: ", key );
+			numErrors++;
+		}
+		return;
+	}
+	if ( mode < 0 && Lux_NameEq( key, "Explosion Radius" ) ) {
+		explRadius[w] = (int)f;
+		numApplied++;
+		return;
+	}
+
 	if ( mode < 0 && ( fd = Lux_FindField( projFields, key ) ) != 0 ) {
 		if ( !Lux_IsExplosive( w ) ) {
 			Lux_Warn( "only for HK69 and grenades, ignored: ", key );
@@ -512,6 +562,12 @@ static void Lux_SetPlayerKey( const char *key, const char *val ) {
 		lux_bandage_time = v;
 	} else if ( Lux_NameEq( key, "Bandage Time Medkit" ) ) {
 		lux_bandage_time_medkit = v;
+	} else if ( Lux_NameEq( key, "Vampire" ) ) {
+		vampPct = v;
+	} else if ( Lux_NameEq( key, "Kill Heal" ) ) {
+		killHeal = v;
+	} else if ( Lux_NameEq( key, "Vampire Max Health" ) ) {
+		vampMax = v;
 	} else if ( Lux_NameEq( key, "Fall Injury" ) ) {
 		lux_fall_injury_far = 0.6f * f / 100;
 		lux_fall_injury_medium = 0.3f * f / 100;
@@ -541,6 +597,56 @@ static void Lux_SetCause( const char *key, const char *val ) {
 	numApplied++;
 }
 
+/* true if Lux_ParseSpec would use the letter codes for this word */
+static int Lux_SpecIsLetters( const char *spec, int items ) {
+	int i;
+	if ( items ) {
+		for ( i = 0; i < NUM_ITEMS; i++ ) {
+			if ( Lux_NameEq( itemNames[i], spec ) || ( i == 0 && Lux_NameEq( "Vest", spec ) ) ) return 0;
+		}
+		return 1;
+	}
+	return !Lux_FindWeaponLoose( spec );
+}
+
+/* "deagle he" / "lr300, medkit" / letters: one spec per word */
+static void Lux_SetLoadoutKey( luxLoadout_t *lo, const char *key, const char *val ) {
+	char word[32];
+	int items, *list, *count, ids[LO_MAX], n, i, k;
+	float f;
+
+	if ( Lux_NameEq( key, "Replace" ) ) {
+		if ( !Lux_ParseNum( val, &f ) ) { Lux_Warn( "Replace must be 0 or 1: ", val ); numErrors++; return; }
+		lo->replace = f != 0;
+		lo->set = 1;
+		numApplied++;
+		return;
+	}
+	if ( Lux_NameEq( key, "Weapons" ) ) {
+		items = 0; list = lo->weapons; count = &lo->numWeapons;
+	} else if ( Lux_NameEq( key, "Items" ) ) {
+		items = 1; list = lo->items; count = &lo->numItems;
+	} else {
+		Lux_Ignore( key );
+		return;
+	}
+	*count = 0;
+	lo->set = 1;
+	while ( *val ) {
+		while ( *val == ' ' || *val == ',' || *val == '\t' ) val++;
+		for ( i = 0; *val && *val != ' ' && *val != ',' && *val != '\t' && i < 31; ) word[i++] = *val++;
+		word[i] = 0;
+		if ( !word[0] ) break;
+		n = Lux_ParseSpec( word, items, ids, LO_MAX );
+		if ( n <= 0 ) { Lux_Warn( items ? "unknown item: " : "unknown weapon: ", word ); numErrors++; continue; }
+		if ( n > 1 || ( word[1] && Lux_SpecIsLetters( word, items ) ) ) {
+			Lux_Warn( "read as letters (one per weapon/item): ", word );
+		}
+		for ( k = 0; k < n && *count < LO_MAX; k++ ) list[( *count )++] = ids[k];
+	}
+	numApplied++;
+}
+
 static void Lux_Assign( const char *key, const char *val ) {
 	int w, mode;
 
@@ -550,6 +656,15 @@ static void Lux_Assign( const char *key, const char *val ) {
 	}
 	if ( depth == 1 && Lux_NameEq( scope[0], "Damage" ) ) {
 		Lux_SetCause( key, val );
+		return;
+	}
+	if ( depth >= 1 && Lux_NameEq( scope[0], "Loadout" ) ) {
+		int team = 0;
+		if ( depth == 2 ) {
+			team = Lux_NameEq( scope[1], "Red" ) ? 1 : Lux_NameEq( scope[1], "Blue" ) ? 2 : -1;
+		}
+		if ( team < 0 || depth > 2 ) { Lux_Warn( "Loadout blocks are Red and Blue, ignored: ", key ); numErrors++; return; }
+		Lux_SetLoadoutKey( &loadouts[team], key, val );
 		return;
 	}
 
@@ -693,6 +808,13 @@ static void Lux_ResetPlayer( void ) {
 	lux_fall_injury_medium = 0.3f;
 	for ( i = 0; i < NUM_BLEED; i++ ) ( (int *)BLEED_TABLE )[i] = bleedStock[i];
 	for ( i = 0; i < 64; i++ ) causeScale[i] = 100;
+	vampPct = killHeal = 0;
+	vampMax = 100;
+	for ( i = 0; i < WT_COUNT; i++ ) {
+		explDamage[i] = 0;
+		explRadius[i] = 150;
+	}
+	for ( i = 0; i < 3; i++ ) loadouts[i].set = loadouts[i].replace = loadouts[i].numWeapons = loadouts[i].numItems = 0;
 	luxReady = 1;
 }
 
@@ -752,11 +874,25 @@ static void Lux_Load( void ) {
 	trap_Printf( msg );
 }
 
-/* "lr300" finds "ZM LR300": unique case-insensitive substring of the name */
+/* common short names that aren't part of the in-game name */
+static const struct { const char *alias; int weapon; } weaponAliases[] = {
+	{ "deagle", 3 }, { "de", 3 }, { "spas", 4 }, { "mp5", 5 }, { "ump", 6 },
+	{ "hk69", 7 }, { "lr", 8 }, { "lr300", 8 }, { "g36", 9 }, { "psg", 10 },
+	{ "he", 11 }, { "nade", 11 }, { "grenade", 11 }, { "smoke", 13 }, { "sr8", 14 },
+	{ "ak", 15 }, { "ak103", 15 }, { "negev", 17 }, { "m4", 19 }, { "glock", 20 },
+	{ "colt", 21 }, { "mac", 22 }, { "mac11", 22 }, { "frf1", 23 }, { "benelli", 24 },
+	{ "p90", 25 }, { "magnum", 26 }, { "tod", 27 }, { "tod50", 27 }, { 0, 0 }
+};
+
+/* "lr300" finds "ZM LR300": alias, or unique case-insensitive substring of the name */
 static int Lux_FindWeaponLoose( const char *query ) {
 	char q[64], n[64];
 	int w, found = 0, i, j;
 	const char *s;
+
+	for ( i = 0; weaponAliases[i].alias; i++ ) {
+		if ( Lux_NameEq( weaponAliases[i].alias, query ) ) return weaponAliases[i].weapon;
+	}
 
 	for ( i = 0, s = query; *s && i < 63; s++ ) {
 		if ( ( *s >= '0' && *s <= '9' ) || ( Lux_Lower( *s ) >= 'a' && Lux_Lower( *s ) <= 'z' ) ) q[i++] = Lux_Lower( *s );
@@ -801,7 +937,13 @@ static void Lux_DumpPlayer( void ) {
 	Lux_CatInt( line, sizeof( line ), lux_bandage_time_medkit );
 	Lux_Cat( line, sizeof( line ), ", Fall Injury " );
 	Lux_CatInt( line, sizeof( line ), (int)( lux_fall_injury_far / 0.6f * 100 + 0.5f ) );
-	Lux_Cat( line, sizeof( line ), "%\n  bleed ticks (100ms) per HP by wounds:" );
+	Lux_Cat( line, sizeof( line ), "%, Vampire " );
+	Lux_CatInt( line, sizeof( line ), vampPct );
+	Lux_Cat( line, sizeof( line ), "%, Kill Heal " );
+	Lux_CatInt( line, sizeof( line ), killHeal );
+	Lux_Cat( line, sizeof( line ), ", Vampire Max Health " );
+	Lux_CatInt( line, sizeof( line ), vampMax );
+	Lux_Cat( line, sizeof( line ), "\n  bleed ticks (100ms) per HP by wounds:" );
 	for ( i = 0; i < NUM_BLEED; i++ ) {
 		Lux_Cat( line, sizeof( line ), " " );
 		Lux_CatInt( line, sizeof( line ), ( (int *)BLEED_TABLE )[i] );
@@ -816,6 +958,26 @@ static void Lux_DumpPlayer( void ) {
 	}
 	Lux_Cat( line, sizeof( line ), "\n" );
 	trap_Printf( line );
+	for ( i = 0; i < 3; i++ ) {
+		luxLoadout_t *lo = &loadouts[i];
+		int k;
+		if ( !lo->set ) continue;
+		line[0] = 0;
+		Lux_Cat( line, sizeof( line ), i == 0 ? "Loadout:" : i == 1 ? "Loadout Red:" : "Loadout Blue:" );
+		Lux_Cat( line, sizeof( line ), lo->replace ? " (replace)" : " (added to gear)" );
+		for ( k = 0; k < lo->numWeapons; k++ ) {
+			Lux_Cat( line, sizeof( line ), " " );
+			Lux_Cat( line, sizeof( line ), Lux_WeaponName( lo->weapons[k] ) );
+			Lux_Cat( line, sizeof( line ), "," );
+		}
+		for ( k = 0; k < lo->numItems; k++ ) {
+			Lux_Cat( line, sizeof( line ), " " );
+			Lux_Cat( line, sizeof( line ), itemNames[lo->items[k] - FIRST_ITEM] );
+			Lux_Cat( line, sizeof( line ), "," );
+		}
+		Lux_Cat( line, sizeof( line ), "\n" );
+		trap_Printf( line );
+	}
 }
 
 static void Lux_CatField( char *line, int size, int w, int off, const luxField_t *fd ) {
@@ -852,6 +1014,12 @@ static void Lux_Dump( void ) {
 	for ( fd = weaponFields; fd->name; fd++ ) {
 		if ( fd->off == WT_RANGE && w != 4 ) continue;	/* only the SPAS uses falloff */
 		Lux_CatField( line, sizeof( line ), w, fd->off, fd );
+	}
+	if ( explDamage[w] > 0 ) {
+		Lux_Cat( line, sizeof( line ), " Explosive Bullets " );
+		Lux_CatInt( line, sizeof( line ), explDamage[w] );
+		Lux_Cat( line, sizeof( line ), ", Explosion Radius " );
+		Lux_CatInt( line, sizeof( line ), explRadius[w] );
 	}
 	Lux_Cat( line, sizeof( line ), "\n" );
 	trap_Printf( line );
@@ -1033,7 +1201,7 @@ static int Lux_ExplosiveForMod( int mod ) {
  * knockback is suppressed and re-applied scaled. That also works in Jump
  * mode, where stock G_Damage returns before knockback for weapon damage.
  */
-int hook_damage( int targ, int inflictor, int attacker, float *dir, float *point,
+static int Lux_Damage( int targ, int inflictor, int attacker, float *dir, float *point,
 		int damage, int dflags, int mod, int extra ) {
 	luxProj_t *p;
 	float knock, n[3], len;
@@ -1121,11 +1289,67 @@ static void Lux_Throw( void ) {
 	*(int *)( ent + ENT_WEAPON ) = old;
 }
 
+/* heal the attacker by Vampire % of the damage dealt, plus Kill Heal on a kill */
+static void Lux_Vampire( int targ, int attacker, int before ) {
+	int after, dealt, heal, hp;
+
+	after = *(int *)( targ + ENT_HEALTH );
+	dealt = before - ( after > 0 ? after : 0 );
+	if ( dealt <= 0 ) return;
+	heal = dealt * vampPct / 100;
+	if ( after <= 0 ) heal += killHeal;
+	hp = *(int *)( attacker + ENT_HEALTH );
+	if ( heal <= 0 || hp <= 0 || hp >= vampMax ) return;
+	hp += heal;
+	if ( hp > vampMax ) hp = vampMax;
+	*(int *)( attacker + ENT_HEALTH ) = hp;
+	*(int *)( *(int *)( attacker + 520 ) + CL_HEALTH ) = hp;
+	if ( verbose >= 2 ) {
+		char line[96];
+		line[0] = 0;
+		Lux_Cat( line, sizeof( line ), "luxmod: vampire heal " );
+		Lux_CatInt( line, sizeof( line ), heal );
+		Lux_Cat( line, sizeof( line ), " -> " );
+		Lux_CatInt( line, sizeof( line ), hp );
+		Lux_Cat( line, sizeof( line ), "\n" );
+		trap_Printf( line );
+	}
+}
+
+/* every G_Damage call lands here (see build_luxmod.py REDIRECTS) */
+int hook_damage( int targ, int inflictor, int attacker, float *dir, float *point,
+		int damage, int dflags, int mod, int extra ) {
+	int before = 0, r;
+
+	if ( luxReady && ( vampPct || killHeal ) && attacker && attacker != targ
+		&& *(int *)( targ + 520 ) && *(int *)( attacker + 520 ) ) {
+		before = *(int *)( targ + ENT_HEALTH );
+	}
+	r = Lux_Damage( targ, inflictor, attacker, dir, point, damage, dflags, mod, extra );
+	if ( before > 0 ) Lux_Vampire( targ, attacker, before );
+	return r;
+}
+
+/* every bullet impact: stock handling, then an explosion if configured */
+int hook_bullet_hit( int shooter, int trace, int weapon, int a3, int apply, int a5 ) {
+	int r, te;
+	float *end;
+
+	r = UT_BulletHit( shooter, trace, weapon, a3, apply, a5 );
+	if ( !luxReady || !apply || weapon < 1 || weapon >= WT_COUNT || explDamage[weapon] <= 0 ) return r;
+	if ( *(float *)( trace + 8 ) >= 1.0f ) return r;	/* hit nothing */
+	end = (float *)( trace + 12 );
+	G_RadiusDamage( end, shooter, (float)explDamage[weapon], (float)explRadius[weapon],
+		shooter, *Lux_Int( weapon, WT_MOD ) );
+	te = G_TempEntity( end, EV_EXPLOSION );
+	*(int *)( te + ENT_EVENTPARM ) = DirToByte( (float *)( trace + 24 ) );
+	*(int *)( te + ENT_WEAPON ) = 11;	/* look like an HE grenade */
+	if ( verbose >= 2 ) Lux_Print2( "luxmod: explosive bullet from ", Lux_WeaponName( weapon ) );
+	return r;
+}
+
 /* ---- player commands: gh, gw, gi -------------------------------------- */
 
-static const char *itemNames[NUM_ITEMS] = {
-	"Kevlar Vest", "TacGoggles", "Medkit", "Silencer", "Laser Sight", "Helmet", "Extra Ammo"
-};
 
 static unsigned char *Lux_ClientPtr( int i ) {
 	return *(unsigned char **)LEVEL_CLIENTS + i * CLIENT_SIZE;
@@ -1262,6 +1486,64 @@ static void Lux_PlayerCommand( int which ) {
 	}
 }
 
+/* lux_inv <player>: list weapons (with ammo/spare) and items */
+static void Lux_Inventory( void ) {
+	char target[64], line[256];
+	unsigned char *cl;
+	int i, v;
+
+	trap_Argv( 1, target, sizeof( target ) );
+	cl = UT_ClientFromString( target );
+	if ( !cl ) return;
+	line[0] = 0;
+	Lux_Cat( line, sizeof( line ), "weapons:" );
+	for ( i = 0; i < 16; i++ ) {
+		v = ( (int *)( cl + CL_INVENTORY ) )[i];
+		if ( !( v & 255 ) || ( v & 255 ) >= WT_COUNT ) continue;
+		Lux_Cat( line, sizeof( line ), i == Lux_ClientInt( cl, CL_WEAPONSLOT ) ? " *" : " " );
+		Lux_Cat( line, sizeof( line ), Lux_WeaponName( v & 255 ) );
+		Lux_Cat( line, sizeof( line ), " (" );
+		Lux_CatInt( line, sizeof( line ), ( v >> 8 ) & 255 );
+		Lux_Cat( line, sizeof( line ), "/" );
+		Lux_CatInt( line, sizeof( line ), ( v >> 24 ) & 255 );
+		Lux_Cat( line, sizeof( line ), ")" );
+	}
+	Lux_Cat( line, sizeof( line ), "\nitems:" );
+	for ( i = 0; i < 16; i++ ) {
+		v = ( (int *)( cl + CL_ITEMS ) )[i] & 255;
+		if ( v < FIRST_ITEM || v >= FIRST_ITEM + NUM_ITEMS ) continue;
+		Lux_Cat( line, sizeof( line ), " " );
+		Lux_Cat( line, sizeof( line ), itemNames[v - FIRST_ITEM] );
+	}
+	Lux_Cat( line, sizeof( line ), "\n" );
+	trap_Printf( line );
+}
+
+static void Lux_ApplyLoadout( unsigned char *cl ) {
+	luxLoadout_t *lo;
+	int team, i;
+
+	if ( !cl || Lux_ClientInt( cl, CL_TEAM ) == 3 ) return;	/* not spectators */
+	team = Lux_ClientInt( cl, CL_TEAM );
+	lo = ( team == 1 || team == 2 ) && loadouts[team].set ? &loadouts[team] : &loadouts[0];
+	if ( !lo->set ) return;
+	if ( lo->replace ) {
+		for ( i = 0; i < 16; i++ ) {
+			( (int *)( cl + CL_INVENTORY ) )[i] = 0;
+			( (int *)( cl + CL_ITEMS ) )[i] = 0;
+		}
+		*(int *)( cl + CL_WEAPONSLOT ) = 0;
+	}
+	for ( i = 0; i < lo->numWeapons; i++ ) Lux_GiveWeapon( cl, lo->weapons[i] );
+	for ( i = 0; i < lo->numItems; i++ ) UT_GiveItem( cl, lo->items[i] );
+}
+
+/* every gear (re)issue - spawn, or changing gear right after spawning */
+void hook_gear( int client ) {
+	UT_GiveGear( client );
+	if ( luxReady ) Lux_ApplyLoadout( (unsigned char *)client );
+}
+
 /* ---- hooks (vmMain's calls are redirected here) ----------------------- */
 
 void hook_init( int levelTime, int randomSeed, int restart ) {
@@ -1284,6 +1566,10 @@ int hook_console( void ) {
 	}
 	if ( Lux_NameEq( cmd, "lux_diff" ) ) {
 		Lux_Diff();
+		return 1;
+	}
+	if ( Lux_NameEq( cmd, "lux_inv" ) ) {
+		Lux_Inventory();
 		return 1;
 	}
 	if ( Lux_NameEq( cmd, "lux_throw" ) ) {

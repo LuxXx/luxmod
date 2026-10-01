@@ -11,6 +11,10 @@ by **LuxXx** - [github.com/LuxXx](https://github.com/LuxXx) - [x.com/luxdav](htt
   splash knockback and self damage - including grenade jumps in Jump mode
 - Player: start health, teammate healing, bandage time, bleed speed, fall
   injury, and damage per cause (falling, kick, bleeding, drowning, ...)
+- Vampire mode: heal by a share of the damage you deal, bonus health per kill
+- Spawn loadouts: weapons and items on every spawn, added to or replacing
+  the chosen gear, optionally per team
+- Explosive bullets: any bullet weapon can explode on impact
 - Reloaded on every map, or instantly with `lux_reload`
 - Admin commands to give health, weapons and items
 
@@ -83,6 +87,17 @@ Weapons
         Splash Knockback: 300
         Self Damage: 0
     }
+    IMI Negev
+    {
+        Explosive Bullets: 20
+    }
+}
+
+Loadout
+{
+    Weapons: deagle he
+    Items: medkit
+    Replace: 1
 }
 ```
 
@@ -96,8 +111,9 @@ Server console or rcon:
 | `lux_dump <weapon\|player>` | show current values, e.g. `lux_dump lr300` |
 | `lux_diff` | list weapon values that differ from stock |
 | `lux_throw <player> <he\|smoke\|hk69>` | make a player fire a projectile |
+| `lux_inv <player>` | list a player's weapons (ammo/spare) and items |
 | `gh <player\|all> <hp>` | set health, `+N` / `-N` adds |
-| `gw <player\|all> <weapons>` | give or refill weapons: name (`lr300`) or letters (`a` Knife ... `s` M4A1, `t` Glock ... `z` Magnum) |
+| `gw <player\|all> <weapons>` | give or refill weapons: name (`lr300`, `deagle`, `ak`) or letters (`a` Knife ... `s` M4A1, `t` Glock ... `z` Magnum) |
 | `gi <player\|all> <items>` | give items: name (`medkit`) or letters (`a` Vest, `b` TacGoggles, `c` Medkit, `d` Silencer, `e` Laser, `f` Helmet, `g` Extra Ammo) |
 
 Cvars: `lux_config` (file to load, default `luxmod.cfg`), `lux_verbose`

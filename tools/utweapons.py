@@ -100,6 +100,7 @@ CFG_HEADER = """\
 //   lux_dump <weapon>  show current values, e.g. lux_dump lr300 / lux_dump player
 //   lux_diff           list weapon values that differ from stock
 //   lux_throw <player> <he|smoke|hk69>  make a player fire a projectile
+//   lux_inv <player>   list a player's weapons and items
 //   gh <player|all> <hp>       set health, +N / -N adds (1..100)
 //   gw <player|all> <weapons>  give or refill: name (lr300) or letters
 //                              (a Knife .. s M4A1, t Glock .. z Magnum)
@@ -121,6 +122,9 @@ CFG_HEADER = """\
 //   Cycle          ms between shots; at weapon level sets every fire mode
 //   Speed          projectile speed (grenades, HK69, thrown knife only)
 //   Hit Locations  damage in HP per body part, optional "bleed"/"nobleed"
+//   Explosive Bullets  splash damage at every bullet impact (bullet weapons;
+//                      0 = off; the shooter is never hurt by it)
+//   Explosion Radius   radius of those explosions (default 150)
 //
 // Player { } (whole server):
 //   Start Health        health on spawn (1..100)
@@ -131,6 +135,22 @@ CFG_HEADER = """\
 //   Bandage Time Medkit same, with medkit
 //   Bleed Speed         percent; 200 = bleed out twice as fast
 //   Fall Injury         percent of the limp you get from falling (0 = none)
+//   Vampire             percent of damage you deal that heals you (0 = off)
+//   Kill Heal           extra health per kill
+//   Vampire Max Health  vampire/kill healing never goes above this
+//
+// Loadout { } given on every spawn, on top of (or instead of) the chosen gear:
+//   Weapons    names or letters, e.g. "deagle he" or "lr300, smoke"
+//   Items      e.g. "medkit helmet"
+//   Replace    1 = only the loadout, 0 = add it to the player's gear
+//   Red { } / Blue { }  per-team loadouts (same keys), override the general one
+//   Example:
+//     Loadout
+//     {
+//         Weapons: deagle he
+//         Items: medkit
+//         Replace: 1
+//     }
 //
 // Damage { } percent of damage per cause (0 = none, 200 = double):
 //   Falling, Bleeding, Kick, Goomba, Drowning, Slime, Lava, Crush,
@@ -191,7 +211,8 @@ def cfg(qvm_path, out_path):
     out = [CFG_HEADER,
            "Player\n{\n    Start Health: 100\n    Heal Limit: 50\n    Heal Limit Medkit: 90\n"
            "    Heal Step: 15\n    Bandage Time: 1500\n    Bandage Time Medkit: 750\n"
-           "    Bleed Speed: 100\n    Fall Injury: 100\n}\n\n",
+           "    Bleed Speed: 100\n    Fall Injury: 100\n    Vampire: 0\n    Kill Heal: 0\n"
+           "    Vampire Max Health: 100\n}\n\n",
            "Damage\n{\n" + "".join("    %s: 100\n" % c for c in (
                "Falling", "Bleeding", "Kick", "Goomba", "Drowning", "Slime", "Lava",
                "Crush", "Trigger Hurt", "Slap")) + "}\n\n",
