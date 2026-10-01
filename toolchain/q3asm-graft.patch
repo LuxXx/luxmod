@@ -1,0 +1,47 @@
+--- a/code/tools/asm/q3asm.c
++++ b/code/tools/asm/q3asm.c
+@@ -195,6 +195,8 @@
+ 
+ //int		stackSize = 16384;
+ int		stackSize = 0x10000;
++int		graftCodeBase = 0;	// -cb: first instruction index (graft mode)
++int		graftDataBase = 0;	// -db: address of DATA segment (graft mode)
+ 
+ // we need to convert arg and ret instructions to
+ // stores to the local stack frame, so we need to track the
+@@ -1434,14 +1436,15 @@
+ 
+ 	// assemble
+ 	for ( passNumber = 0 ; passNumber < 2 ; passNumber++ ) {
+-		segment[LITSEG].segmentBase = segment[DATASEG].imageUsed;
++		segment[DATASEG].segmentBase = graftDataBase;
++		segment[LITSEG].segmentBase = graftDataBase + segment[DATASEG].imageUsed;
+ 		segment[BSSSEG].segmentBase = segment[LITSEG].segmentBase + segment[LITSEG].imageUsed;
+ 		segment[JTRGSEG].segmentBase = segment[BSSSEG].segmentBase + segment[BSSSEG].imageUsed;
+ 		for ( i = 0 ; i < NUM_SEGMENTS ; i++ ) {
+ 			segment[i].imageUsed = 0;
+ 		}
+ 		segment[DATASEG].imageUsed = 4;		// skip the 0 byte, so NULL pointers are fixed up properly
+-		instructionCount = 0;
++		instructionCount = graftCodeBase;
+ 
+ 		for ( i = 0 ; i < numAsmFiles ; i++ ) {
+ 			currentFileIndex = i;
+@@ -1566,6 +1569,17 @@
+ 			continue;
+ 		}
+ 
++		if ( !strcmp( argv[i], "-cb" ) && i < argc - 1 ) {
++			graftCodeBase = atoiNoCap( argv[++i] );
++			continue;
++		}
++
++		if ( !strcmp( argv[i], "-db" ) && i < argc - 1 ) {
++			graftDataBase = atoiNoCap( argv[++i] );
++			stackSize = 0;	// the host VM owns the stack
++			continue;
++		}
++
+ 		if (!strcmp(argv[i], "-b")) {
+ 			if (i == argc - 1) {
+ 				Error("-b requires an argument");

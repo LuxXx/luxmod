@@ -1,0 +1,12 @@
+# Never publish Urban Terror files or anything built from them:
+# qagame.qvm and the pk3 contain FrozenSand's game code.
+*.pk3
+*.qvm
+build/
+work/
+
+# toolchain is rebuilt by scripts/setup_toolchain.sh
+toolchain/build/
+toolchain/ioUrbanTerror/
+
+__pycache__/
